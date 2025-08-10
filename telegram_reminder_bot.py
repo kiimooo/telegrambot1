@@ -479,6 +479,10 @@ class TelegramReminderBot:
             self.scheduler.start()
             logger.info("调度器已启动")
             
+            # 初始化 Bot 对象
+            await self.bot.initialize()
+            logger.info("Bot 对象已初始化")
+            
             # 初始化应用但不启动 polling
             await self.application.initialize()
             await self.application.start()
@@ -493,6 +497,7 @@ class TelegramReminderBot:
         try:
             await self.application.stop()
             await self.application.shutdown()
+            await self.bot.shutdown()
         except:
             pass
         self.scheduler.shutdown()
