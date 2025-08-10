@@ -13,6 +13,7 @@ import threading
 from datetime import datetime, timedelta
 from typing import Optional, Tuple, List, Dict
 import json
+import queue
 
 from telegram import Update, Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -515,8 +516,24 @@ class TelegramReminderBot:
         except Exception as e:
             logger.error(f"处理更新失败: {e}")
     
+    async def _process_update_queue(self):
+        """处理更新队列"""
+        while True:
+            try:
+                # 非阻塞地检查队列
+                try:
+                    update_data = update_queue.get_nowait()
+                    await self.process_update(update_data)
+                    update_queue.task_done()
+                except queue.Empty:
+                    # 队列为空，等待一小段时间
+                    await asyncio.sleep(0.1)
+            except Exception as e:
+                logger.error(f"队列处理错误: {e}")
+                await asyncio.sleep(1)
+    
     async def initialize(self):
-        """初始化机器人（不启动 polling）"""
+        """初始化机器人"""
         try:
             # 启动调度器
             self.scheduler.start()
@@ -530,6 +547,10 @@ class TelegramReminderBot:
             await self.application.initialize()
             await self.application.start()
             logger.info("机器人应用已初始化")
+            
+            # 启动队列处理任务
+            asyncio.create_task(self._process_update_queue())
+            logger.info("更新队列处理任务已启动")
             
         except Exception as e:
             logger.error(f"机器人初始化错误: {e}")
@@ -549,6 +570,8 @@ class TelegramReminderBot:
 # 为云平台添加健康检查端点和 Webhook 处理
 app = Flask(__name__)
 bot_instance = None  # 全局机器人实例
+update_queue = queue.Queue()  # 更新队列
+main_loop = None  # 主事件循环
 
 @app.route('/')
 def health_check():
@@ -567,17 +590,8 @@ def webhook():
         
         update_data = request.get_json()
         if update_data:
-            # 在后台线程中处理更新
-            def process_in_background():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(bot_instance.process_update(update_data))
-                loop.close()
-            
-            thread = threading.Thread(target=process_in_background)
-            thread.daemon = True
-            thread.start()
-            
+            # 将更新放入队列，由主事件循环处理
+            update_queue.put(update_data)
             return jsonify({'status': 'ok'})
         else:
             return jsonify({'error': 'No data received'}), 400
@@ -587,7 +601,7 @@ def webhook():
 
 def setup_webhook_mode():
     """设置 Webhook 模式"""
-    global bot_instance
+    global bot_instance, main_loop
     
     # 优先从环境变量获取Token（推荐用于生产环境）
     token = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -613,8 +627,8 @@ def setup_webhook_mode():
     # 创建机器人实例
     bot_instance = TelegramReminderBot(token)
     
-    # 在新的事件循环中初始化机器人
-    async def init_bot():
+    # 在新的事件循环中初始化机器人并保持运行
+    async def init_and_run_bot():
         try:
             await bot_instance.initialize()
             
@@ -634,20 +648,33 @@ def setup_webhook_mode():
             await bot_instance.setup_webhook(webhook_url)
             logger.info("✅ 机器人初始化完成（Webhook模式）")
             
+            # 保持事件循环运行
+            while True:
+                await asyncio.sleep(1)
+            
         except Exception as e:
             logger.error(f"机器人初始化失败: {e}")
     
-    # 在后台线程中运行异步初始化
-    def run_async_init():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(init_bot())
-        loop.close()
+    # 在后台线程中运行异步初始化和主循环
+    def run_async_loop():
+        global main_loop
+        main_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(main_loop)
+        main_loop.run_until_complete(init_and_run_bot())
     
-    init_thread = threading.Thread(target=run_async_init)
+    init_thread = threading.Thread(target=run_async_loop)
     init_thread.daemon = True
     init_thread.start()
-    init_thread.join()  # 等待初始化完成
+    
+    # 等待机器人初始化完成
+    import time
+    timeout = 30  # 30秒超时
+    start_time = time.time()
+    while bot_instance is None or not hasattr(bot_instance, 'application') or bot_instance.application is None:
+        if time.time() - start_time > timeout:
+            logger.error("机器人初始化超时")
+            break
+        time.sleep(0.1)
     
     return bot_instance
 
