@@ -25,7 +25,7 @@ from apscheduler.executors.asyncio import AsyncIOExecutor
 import dateparser
 from dateparser.search import search_dates
 import tzlocal
-from flask import Flask
+from flask import Flask, request, jsonify
 
 # 配置日志
 logging.basicConfig(
@@ -454,42 +454,53 @@ class TelegramReminderBot:
             # 若未达到两次，则继续调度下一次重试
             await self._schedule_retry(reminder_data)
             
-    async def run(self):
-        """启动机器人"""
+    async def setup_webhook(self, webhook_url: str):
+        """设置 Webhook"""
+        try:
+            await self.bot.set_webhook(url=webhook_url)
+            logger.info(f"Webhook 已设置: {webhook_url}")
+        except Exception as e:
+            logger.error(f"设置 Webhook 失败: {e}")
+            raise
+    
+    async def process_update(self, update_data: dict):
+        """处理 Webhook 接收到的更新"""
+        try:
+            update = Update.de_json(update_data, self.bot)
+            if update:
+                await self.application.process_update(update)
+        except Exception as e:
+            logger.error(f"处理更新失败: {e}")
+    
+    async def initialize(self):
+        """初始化机器人（不启动 polling）"""
         try:
             # 启动调度器
             self.scheduler.start()
             logger.info("调度器已启动")
             
-            # 手动启动机器人
-            logger.info("Telegram提醒机器人启动中...")
+            # 初始化应用但不启动 polling
             await self.application.initialize()
             await self.application.start()
-            await self.application.updater.start_polling()
-            
-            # 保持运行
-            logger.info("机器人已启动，按Ctrl+C停止")
-            try:
-                # 使用无限循环保持程序运行
-                while True:
-                    await asyncio.sleep(1)
-            except KeyboardInterrupt:
-                logger.info("收到停止信号")
+            logger.info("机器人应用已初始化")
             
         except Exception as e:
-            logger.error(f"机器人运行错误: {e}")
-        finally:
-            # 清理资源
-            try:
-                await self.application.stop()
-                await self.application.shutdown()
-            except:
-                pass
-            self.scheduler.shutdown()
-            logger.info("机器人已停止")
+            logger.error(f"机器人初始化错误: {e}")
+            raise
+    
+    async def shutdown(self):
+        """关闭机器人"""
+        try:
+            await self.application.stop()
+            await self.application.shutdown()
+        except:
+            pass
+        self.scheduler.shutdown()
+        logger.info("机器人已停止")
 
-# 为云平台添加健康检查端点
+# 为云平台添加健康检查端点和 Webhook 处理
 app = Flask(__name__)
+bot_instance = None  # 全局机器人实例
 
 @app.route('/')
 def health_check():
@@ -499,8 +510,37 @@ def health_check():
 def health():
     return "OK"
 
-async def main():
-    """主函数"""
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """处理 Telegram Webhook"""
+    try:
+        if bot_instance is None:
+            return jsonify({'error': 'Bot not initialized'}), 500
+        
+        update_data = request.get_json()
+        if update_data:
+            # 在后台线程中处理更新
+            def process_in_background():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(bot_instance.process_update(update_data))
+                loop.close()
+            
+            thread = threading.Thread(target=process_in_background)
+            thread.daemon = True
+            thread.start()
+            
+            return jsonify({'status': 'ok'})
+        else:
+            return jsonify({'error': 'No data received'}), 400
+    except Exception as e:
+        logger.error(f"Webhook 处理错误: {e}")
+        return jsonify({'error': str(e)}), 500
+
+def setup_webhook_mode():
+    """设置 Webhook 模式"""
+    global bot_instance
+    
     # 优先从环境变量获取Token（推荐用于生产环境）
     token = os.getenv('TELEGRAM_BOT_TOKEN')
     
@@ -518,28 +558,78 @@ async def main():
         print("4. 获得Token后设置环境变量：")
         print("   Windows: set TELEGRAM_BOT_TOKEN=你的token")
         print("   Linux/Mac: export TELEGRAM_BOT_TOKEN=你的token")
+        return None
+    
+    logger.info("🤖 Telegram提醒机器人启动中（Webhook模式）...")
+    
+    # 创建机器人实例
+    bot_instance = TelegramReminderBot(token)
+    
+    # 在新的事件循环中初始化机器人
+    async def init_bot():
+        try:
+            await bot_instance.initialize()
+            
+            # 设置 Webhook URL
+            webhook_url = os.getenv('WEBHOOK_URL')
+            if not webhook_url:
+                # 如果没有设置 WEBHOOK_URL，尝试从 Render 环境变量构建
+                render_service_url = os.getenv('RENDER_EXTERNAL_URL')
+                if render_service_url:
+                    webhook_url = f"{render_service_url}/webhook"
+                else:
+                    # 默认使用本地测试 URL（仅用于开发）
+                    port = int(os.getenv('PORT', 8080))
+                    webhook_url = f"https://your-app-name.onrender.com/webhook"
+                    logger.warning(f"未设置 WEBHOOK_URL 环境变量，使用默认值: {webhook_url}")
+            
+            await bot_instance.setup_webhook(webhook_url)
+            logger.info("✅ 机器人初始化完成（Webhook模式）")
+            
+        except Exception as e:
+            logger.error(f"机器人初始化失败: {e}")
+    
+    # 在后台线程中运行异步初始化
+    def run_async_init():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(init_bot())
+        loop.close()
+    
+    init_thread = threading.Thread(target=run_async_init)
+    init_thread.daemon = True
+    init_thread.start()
+    init_thread.join()  # 等待初始化完成
+    
+    return bot_instance
+
+def main():
+    """主函数（同步版本，适用于 Flask）"""
+    # 设置机器人
+    bot = setup_webhook_mode()
+    if bot is None:
         return
     
-    logger.info("🤖 Telegram提醒机器人启动中...")
-    
-    # 为云平台添加端口监听（健康检查）
+    # 获取端口
     port = int(os.getenv('PORT', 8080))
     
-    # 在单独线程中运行Flask应用（健康检查）
-    flask_thread = threading.Thread(
-        target=lambda: app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
-    )
-    flask_thread.daemon = True
-    flask_thread.start()
-    logger.info(f"🌐 健康检查服务启动在端口 {port}")
-        
-    # 创建并运行机器人
-    bot = TelegramReminderBot(token)
+    logger.info(f"🌐 启动 Flask 服务器在端口 {port}")
     
+    # 运行 Flask 应用（阻塞模式）
     try:
-        await bot.run()
+        app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
     except KeyboardInterrupt:
-        print("\n机器人已停止")
+        logger.info("\n收到停止信号")
+        # 清理资源
+        if bot_instance:
+            async def cleanup():
+                await bot_instance.shutdown()
+            
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(cleanup())
+            loop.close()
+        print("机器人已停止")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
