@@ -9,6 +9,7 @@ import os
 import logging
 import asyncio
 import re
+import threading
 from datetime import datetime, timedelta
 from typing import Optional, Tuple, List, Dict
 import json
@@ -24,6 +25,7 @@ from apscheduler.executors.asyncio import AsyncIOExecutor
 import dateparser
 from dateparser.search import search_dates
 import tzlocal
+from flask import Flask
 
 # 配置日志
 logging.basicConfig(
@@ -397,6 +399,17 @@ class TelegramReminderBot:
             self.scheduler.shutdown()
             logger.info("机器人已停止")
 
+# 为云平台添加健康检查端点
+app = Flask(__name__)
+
+@app.route('/')
+def health_check():
+    return "Telegram Reminder Bot is running! 🤖"
+
+@app.route('/health')
+def health():
+    return "OK"
+
 async def main():
     """主函数"""
     # 优先从环境变量获取Token（推荐用于生产环境）
@@ -406,6 +419,30 @@ async def main():
     if not token:
         token = "8495151574:AAGBRdMb1qvdS0qCdQEH4pl8xkDuc_97s6Q"
         logger.warning("使用默认Token，建议在生产环境中设置TELEGRAM_BOT_TOKEN环境变量")
+    
+    if not token or token.startswith("你的"):
+        logger.error("❌ 错误：请设置有效的TELEGRAM_BOT_TOKEN环境变量")
+        print("获取Token方法：")
+        print("1. 在Telegram中搜索 @BotFather")
+        print("2. 发送 /newbot 创建新机器人")
+        print("3. 按提示设置机器人名称")
+        print("4. 获得Token后设置环境变量：")
+        print("   Windows: set TELEGRAM_BOT_TOKEN=你的token")
+        print("   Linux/Mac: export TELEGRAM_BOT_TOKEN=你的token")
+        return
+    
+    logger.info("🤖 Telegram提醒机器人启动中...")
+    
+    # 为云平台添加端口监听（健康检查）
+    port = int(os.getenv('PORT', 8080))
+    
+    # 在单独线程中运行Flask应用（健康检查）
+    flask_thread = threading.Thread(
+        target=lambda: app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    )
+    flask_thread.daemon = True
+    flask_thread.start()
+    logger.info(f"🌐 健康检查服务启动在端口 {port}")
         
     # 创建并运行机器人
     bot = TelegramReminderBot(token)

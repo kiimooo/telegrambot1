@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: telegram-reminder-bot
+    env: python
+    region: singapore  # 选择离中国较近的区域
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python telegram_reminder_bot.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false  # 需要手动在Render控制台设置
+      - key: PORT
+        value: 10000  # Render默认端口
+    healthCheckPath: /health
+    autoDeploy: true  # 代码推送时自动部署
