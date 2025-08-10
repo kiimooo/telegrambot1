@@ -26,6 +26,7 @@ from apscheduler.executors.pool import ThreadPoolExecutor
 import dateparser
 from dateparser.search import search_dates
 import tzlocal
+import pytz
 from flask import Flask, request, jsonify
 
 # 配置日志
@@ -51,11 +52,13 @@ class TelegramReminderBot:
             'max_instances': 3,
             'misfire_grace_time': 10  # 容忍±10秒误差
         }
+        # 设置为 GMT+8 时区（北京时间）
+        self.timezone = pytz.timezone('Asia/Shanghai')
         self.scheduler = BackgroundScheduler(
             jobstores=jobstores,
             executors=executors,
             job_defaults=job_defaults,
-            timezone=str(tzlocal.get_localzone())
+            timezone=self.timezone
         )
         
         # 存储用户提醒数据
@@ -109,7 +112,8 @@ class TelegramReminderBot:
             await update.message.reply_text("📭 暂无待办提醒事项")
             return
             
-        now = datetime.now()
+        # 使用 GMT+8 时区的当前时间
+        now = datetime.now(self.timezone).replace(tzinfo=None)
         tomorrow = now + timedelta(hours=24)
         
         upcoming_reminders = []
@@ -129,14 +133,15 @@ class TelegramReminderBot:
         for i, reminder in enumerate(upcoming_reminders, 1):
             reminder_time = datetime.fromisoformat(reminder['time'])
             time_str = reminder_time.strftime("%m-%d %H:%M")
-            reminder_list += f"{i}. `{time_str}` - {reminder['event']}\n"
+            reminder_list += f"{i}. `{time_str}` (北京时间) - {reminder['event']}\n"
             
         await update.message.reply_text(reminder_list, parse_mode='Markdown')
         
     def parse_time_and_event(self, text: str) -> Tuple[Optional[datetime], Optional[str]]:
         """解析时间和事件"""
         try:
-            now = datetime.now()
+            # 使用 GMT+8 时区的当前时间
+            now = datetime.now(self.timezone).replace(tzinfo=None)
             
             # 中文数字转换字典
             chinese_numbers = {
@@ -333,7 +338,7 @@ class TelegramReminderBot:
             return
             
         # 检查时间是否过于接近当前时间（至少1分钟后）
-        now = datetime.now()
+        now = datetime.now(self.timezone).replace(tzinfo=None)
         # 移除不必要的最小间隔限制，仅要求是未来时间（已在解析阶段保证）
         # if reminder_time <= now + timedelta(minutes=1):
         #     await update.message.reply_text("❌ 提醒时间至少需要在1分钟后")
@@ -365,10 +370,11 @@ class TelegramReminderBot:
             misfire_grace_time=10
         )
         
-        # 确认消息
+        # 确认消息 - 将时间转换为GMT+8显示
+        # 由于reminder_time是基于GMT+8计算的，直接格式化即可
         time_str = reminder_time.strftime("%Y-%m-%d %H:%M")
         confirm_msg = f"✅ 提醒已设置！\n\n" \
-                     f"⏰ 时间：`{time_str}`\n" \
+                     f"⏰ 时间：`{time_str}` (北京时间)\n" \
                      f"📝 事件：{event}"
         await update.message.reply_text(confirm_msg, parse_mode='Markdown')
         
