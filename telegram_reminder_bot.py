@@ -80,6 +80,8 @@ class TelegramReminderBot:
 ⏰ *支持的时间格式：*
 • 绝对时间：`2025-01-15 14:30` 或 `14:30`
 • 相对时间：`1小时后` `明天上午9点` `下周一15:00`
+• 天级提醒：`五天后` `3天后`
+• 小时级提醒：`五小时后` `2小时后`
 • 分钟级提醒：`5分钟后` `十分钟后` `30分钟后`
 
 📋 *可用命令：*
@@ -88,7 +90,8 @@ class TelegramReminderBot:
 
 💡 *示例：*
 • `明天10点 项目会议`
-• `1小时后 喝水`
+• `五小时后 睡觉`
+• `五天后 续费提醒`
 • `5分钟后 洗澡`
 • `十分钟后 休息一下`
 • `2025-01-15 14:30 重要会议`
@@ -134,7 +137,99 @@ class TelegramReminderBot:
         try:
             now = datetime.now()
             
-            # 首先尝试解析分钟级相对时间（如：5分钟后、十分钟后）
+            # 中文数字转换字典
+            chinese_numbers = {
+                '一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
+                '六': 6, '七': 7, '八': 8, '九': 9, '十': 10,
+                '十一': 11, '十二': 12, '十三': 13, '十四': 14, '十五': 15,
+                '十六': 16, '十七': 17, '十八': 18, '十九': 19, '二十': 20,
+                '二十一': 21, '二十二': 22, '二十三': 23, '二十四': 24,
+                '三十': 30, '四十': 40, '五十': 50, '六十': 60
+            }
+            
+            # 首先尝试解析天级相对时间（如：五天后、3天后）
+            day_patterns = [
+                r'(\d+)\s*天后',  # 数字+天后
+                r'([一二三四五六七八九十]+)\s*天后',  # 中文数字+天后
+                r'(\d+)\s*day[s]?\s*later',  # 英文格式
+                r'in\s*(\d+)\s*day[s]?',  # 英文格式
+                r'after\s*(\d+)\s*day[s]?'  # 英文格式
+            ]
+            
+            for pattern in day_patterns:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    time_str = match.group(0)
+                    day_str = match.group(1)
+                    
+                    if day_str in chinese_numbers:
+                        days = chinese_numbers[day_str]
+                    elif day_str.isdigit():
+                        days = int(day_str)
+                    else:
+                        continue
+                    
+                    # 计算目标时间
+                    target_time = now + timedelta(days=days)
+                    
+                    # 提取事件文本
+                    event_text = re.sub(re.escape(time_str), '', text, count=1).strip()
+                    event_text = re.sub(r'^\s*[-–—]\s*', '', event_text)
+                    event_text = re.sub(r'\s*[-–—]\s*$', '', event_text)
+                    event_text = event_text.strip()
+                    
+                    if not event_text:
+                        event_text = "提醒事项"
+                    
+                    # 检查事件文本长度
+                    if len(event_text.encode('utf-8')) > 200:
+                        return None, None
+                    
+                    logger.info(f"解析天级提醒: {days}天后 - {event_text}")
+                    return target_time, event_text
+            
+            # 然后尝试解析小时级相对时间（如：五小时后、3小时后）
+            hour_patterns = [
+                r'(\d+)\s*小时后',  # 数字+小时后
+                r'([一二三四五六七八九十]+)\s*小时后',  # 中文数字+小时后
+                r'(\d+)\s*hour[s]?\s*later',  # 英文格式
+                r'in\s*(\d+)\s*hour[s]?',  # 英文格式
+                r'after\s*(\d+)\s*hour[s]?'  # 英文格式
+            ]
+            
+            for pattern in hour_patterns:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    time_str = match.group(0)
+                    hour_str = match.group(1)
+                    
+                    if hour_str in chinese_numbers:
+                        hours = chinese_numbers[hour_str]
+                    elif hour_str.isdigit():
+                        hours = int(hour_str)
+                    else:
+                        continue
+                    
+                    # 计算目标时间
+                    target_time = now + timedelta(hours=hours)
+                    
+                    # 提取事件文本
+                    event_text = re.sub(re.escape(time_str), '', text, count=1).strip()
+                    event_text = re.sub(r'^\s*[-–—]\s*', '', event_text)
+                    event_text = re.sub(r'\s*[-–—]\s*$', '', event_text)
+                    event_text = event_text.strip()
+                    
+                    if not event_text:
+                        event_text = "提醒事项"
+                    
+                    # 检查事件文本长度
+                    if len(event_text.encode('utf-8')) > 200:
+                        return None, None
+                    
+                    logger.info(f"解析小时级提醒: {hours}小时后 - {event_text}")
+                    return target_time, event_text
+            
+            # 最后尝试解析分钟级相对时间（如：5分钟后、十分钟后）
             minute_patterns = [
                 r'(\d+)\s*分钟后',  # 数字+分钟后
                 r'([一二三四五六七八九十]+)\s*分钟后',  # 中文数字+分钟后
@@ -148,14 +243,6 @@ class TelegramReminderBot:
                 if match:
                     time_str = match.group(0)
                     minute_str = match.group(1)
-                    
-                    # 转换中文数字为阿拉伯数字
-                    chinese_numbers = {
-                        '一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
-                        '六': 6, '七': 7, '八': 8, '九': 9, '十': 10,
-                        '十一': 11, '十二': 12, '十三': 13, '十四': 14, '十五': 15,
-                        '二十': 20, '三十': 30, '四十': 40, '五十': 50, '六十': 60
-                    }
                     
                     if minute_str in chinese_numbers:
                         minutes = chinese_numbers[minute_str]
@@ -237,7 +324,9 @@ class TelegramReminderBot:
             error_msg = "❌ 无法解析时间或事件，请检查格式\n\n" \
                        "正确格式示例：\n" \
                        "• `明天10点 项目会议`\n" \
-                       "• `1小时后 喝水`\n" \
+                       "• `五小时后 睡觉`\n" \
+                       "• `五天后 续费提醒`\n" \
+                       "• `5分钟后 休息`\n" \
                        "• `2025-01-15 14:30 重要会议`"
             await update.message.reply_text(error_msg, parse_mode='Markdown')
             return
