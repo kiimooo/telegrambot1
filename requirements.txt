@@ -2,4 +2,5 @@ python-telegram-bot>=21.0,<22.0
 APScheduler>=3.10,<4.0
 dateparser>=1.2,<2.0
 tzlocal>=5.2,<6.0
+pytz>=2023.3
 flask>=2.3,<3.0
