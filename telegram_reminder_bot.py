@@ -18,9 +18,9 @@ from telegram import Update, Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.error import TelegramError
 
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.jobstores.memory import MemoryJobStore
-from apscheduler.executors.asyncio import AsyncIOExecutor
+from apscheduler.executors.pool import ThreadPoolExecutor
 
 import dateparser
 from dateparser.search import search_dates
@@ -44,13 +44,13 @@ class TelegramReminderBot:
         
         # 初始化调度器
         jobstores = {'default': MemoryJobStore()}
-        executors = {'default': AsyncIOExecutor()}
+        executors = {'default': ThreadPoolExecutor(20)}
         job_defaults = {
             'coalesce': False,
             'max_instances': 3,
             'misfire_grace_time': 10  # 容忍±10秒误差
         }
-        self.scheduler = AsyncIOScheduler(
+        self.scheduler = BackgroundScheduler(
             jobstores=jobstores,
             executors=executors,
             job_defaults=job_defaults,
@@ -371,49 +371,67 @@ class TelegramReminderBot:
                      f"📝 事件：{event}"
         await update.message.reply_text(confirm_msg, parse_mode='Markdown')
         
-    async def send_reminder(self, reminder_data: Dict):
+    def send_reminder(self, reminder_data: Dict):
         """发送提醒消息"""
-        try:
-            chat_id = reminder_data['chat_id']
-            event = reminder_data['event']
-            user_id = reminder_data['user_id']
-            
-            reminder_msg = f"⏰ *提醒时间到了！*\n\n📝 {event}"
-            
-            await self.bot.send_message(
-                chat_id=chat_id,
-                text=reminder_msg,
-                parse_mode='Markdown'
-            )
-            
-            # 从用户提醒列表中移除已完成的提醒
-            if user_id in self.user_reminders:
-                self.user_reminders[user_id] = [
-                    r for r in self.user_reminders[user_id] 
-                    if r['job_id'] != reminder_data['job_id']
-                ]
+        async def _async_send():
+            try:
+                chat_id = reminder_data['chat_id']
+                event = reminder_data['event']
+                user_id = reminder_data['user_id']
                 
-            logger.info(f"提醒发送成功: {event}")
-            
-        except TelegramError as e:
-            logger.error(f"发送提醒失败: {e}")
-            await self._schedule_retry(reminder_data)
-        except Exception as e:
-            logger.error(f"发送提醒发生未知错误: {e}")
-            await self._schedule_retry(reminder_data)
+                reminder_msg = f"⏰ *提醒时间到了！*\n\n📝 {event}"
+                
+                await self.bot.send_message(
+                    chat_id=chat_id,
+                    text=reminder_msg,
+                    parse_mode='Markdown'
+                )
+                
+                # 从用户提醒列表中移除已完成的提醒
+                if user_id in self.user_reminders:
+                    self.user_reminders[user_id] = [
+                        r for r in self.user_reminders[user_id] 
+                        if r['job_id'] != reminder_data['job_id']
+                    ]
+                    
+                logger.info(f"提醒发送成功: {event}")
+                
+            except TelegramError as e:
+                logger.error(f"发送提醒失败: {e}")
+                self._schedule_retry(reminder_data)
+            except Exception as e:
+                logger.error(f"发送提醒发生未知错误: {e}")
+                self._schedule_retry(reminder_data)
+        
+        # 在新的事件循环中运行异步代码
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(_async_send())
+        finally:
+            loop.close()
 
-    async def _schedule_retry(self, reminder_data: Dict):
+    def _schedule_retry(self, reminder_data: Dict):
         """调度失败重试任务：至少2次，间隔5分钟"""
         retry_count = reminder_data.get('retry_count', 0)
         if retry_count >= 2:
             # 达到最大重试次数，通知用户失败
+            async def _notify_failure():
+                try:
+                    await self.bot.send_message(
+                        chat_id=reminder_data['chat_id'],
+                        text=f"❗提醒发送失败（已重试{retry_count}次）：{reminder_data['event']}",
+                    )
+                except Exception:
+                    pass
+            
+            # 在新的事件循环中运行异步代码
             try:
-                await self.bot.send_message(
-                    chat_id=reminder_data['chat_id'],
-                    text=f"❗提醒发送失败（已重试{retry_count}次）：{reminder_data['event']}",
-                )
-            except Exception:
-                pass
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(_notify_failure())
+            finally:
+                loop.close()
             return
         
         updated_data = dict(reminder_data)
@@ -433,26 +451,51 @@ class TelegramReminderBot:
             misfire_grace_time=10
         )
 
-    async def retry_send_reminder(self, reminder_data: Dict):
+    def retry_send_reminder(self, reminder_data: Dict):
         """执行重试发送逻辑"""
+        async def _async_retry():
+            try:
+                await self.bot.send_message(
+                    chat_id=reminder_data['chat_id'],
+                    text=f"⏰ *延迟提醒*\n\n📝 {reminder_data['event']}",
+                    parse_mode='Markdown'
+                )
+                # 成功后从用户提醒列表移除
+                user_id = reminder_data['user_id']
+                if user_id in self.user_reminders:
+                    self.user_reminders[user_id] = [
+                        r for r in self.user_reminders[user_id]
+                        if r['job_id'] != reminder_data['job_id']
+                    ]
+                logger.info("重试提醒发送成功")
+            except Exception as e:
+                logger.error(f"重试提醒仍失败: {e}")
+                # 若未达到两次，则继续调度下一次重试
+                retry_count = reminder_data.get('retry_count', 0)
+                if retry_count < 2:
+                    updated_data = dict(reminder_data)
+                    updated_data['retry_count'] = retry_count + 1
+                    run_at = datetime.now() + timedelta(minutes=5)
+                    job_id = f"{reminder_data['job_id']}_retry_{updated_data['retry_count']}"
+                    logger.info(f"调度第{updated_data['retry_count']}次重试，时间：{run_at}")
+                    self.scheduler.add_job(
+                        self.retry_send_reminder,
+                        'date',
+                        run_date=run_at,
+                        args=[updated_data],
+                        id=job_id,
+                        replace_existing=True,
+                        max_instances=1,
+                        misfire_grace_time=10
+                    )
+        
+        # 在新的事件循环中运行异步代码
         try:
-            await self.bot.send_message(
-                chat_id=reminder_data['chat_id'],
-                text=f"⏰ *延迟提醒*\n\n📝 {reminder_data['event']}",
-                parse_mode='Markdown'
-            )
-            # 成功后从用户提醒列表移除
-            user_id = reminder_data['user_id']
-            if user_id in self.user_reminders:
-                self.user_reminders[user_id] = [
-                    r for r in self.user_reminders[user_id]
-                    if r['job_id'] != reminder_data['job_id']
-                ]
-            logger.info("重试提醒发送成功")
-        except Exception as e:
-            logger.error(f"重试提醒仍失败: {e}")
-            # 若未达到两次，则继续调度下一次重试
-            await self._schedule_retry(reminder_data)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(_async_retry())
+        finally:
+            loop.close()
             
     async def setup_webhook(self, webhook_url: str):
         """设置 Webhook"""
